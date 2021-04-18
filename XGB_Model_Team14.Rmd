@@ -1,0 +1,160 @@
+---
+title: "NYC Taxi Fare Model"
+author: "Ian Lawson"
+date: "4/17/2021"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data Entry and Cleaning
+
+Load all required libraries. 
+```{r include=FALSE}
+rm(list = ls())
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(caret)
+library(ModelMetrics)
+set.seed(420)
+```
+
+
+Read in the smaller version of the data. The entire dataset was too large (5.5 GB) to run given RAM constraints. Next the key was removed and any NA's were omitted. 
+
+```{r}
+#read in the data
+df<-read.csv('train_small.csv')
+#remove the key column to save space
+df<-subset(df,select = -key)
+#omit NA's
+df<-na.omit(df)
+```
+
+
+The first real data cleaning involved removing any pick up and drop off coordinates that are outside of the United States and Canada. Many of the coordiates given where completely invalid, or they were impossible to be reached via taxi. Any passenger counts above 20 were also removed based on the unlikelyhood of it happening. 
+
+```{r}
+str(df)
+
+df<- df%>%filter(between(pickup_longitude,-120,-60) & between(dropoff_longitude,-120,-60))%>%
+      filter(between(pickup_latitude,25,55) & between(dropoff_latitude,25,55))%>%
+      filter(passenger_count < 20)
+```
+
+
+Next the pickup date and time information needed to be parsed out. The data was split and converted to the correct type. 
+
+```{r}
+#split the pickup time column
+df<- df%>%separate(pickup_datetime,c('date', 'time'),extra='drop',sep = ' ')
+#convert date column to date
+df$date<-as.Date(df$date)
+#convert time column to time
+df$time<-hms(df$time)
+```
+
+
+A day, weekday, and month column were created and the data was converted to factors. Another column was created for time and it listed the minutes after midnight. This column was left as numeric.
+
+```{r}
+#add columns and convert to factors
+df$month<-as.factor(month(df$date))
+df$day<-as.factor(day(df$date))
+df$weekday<-as.factor(wday(df$date))
+df$min_after_midnight<-hour(df$time)*60+minute(df$time)
+
+```
+
+
+Finally, the data was plotted using boxplots to show the overall characteristics of the data. Generally it looked decent, but the coordinates had many outliers. 
+
+```{r}
+boxplot(df$fare_amount,horizontal = T,main='Fare Amount')
+boxplot(df$pickup_longitude,df$dropoff_longitude,horizontal = T,main='Pickup and Dropoff Longitude')
+boxplot(df$pickup_latitude,df$dropoff_latitude,horizontal = T,main='Pickup and Dropoff Latitude')
+boxplot(df$passenger_count,horizontal = T,main='Passenger Count')
+boxplot(month(df$date),horizontal = T,main='Month')
+boxplot(day(df$date),horizontal = T,main='Day')
+boxplot(wday(df$date),horizontal = T,main='Day of the Week')
+boxplot(df$min_after_midnight,horizontal = T,main='Minutes After Midnight')
+```
+
+
+To finish, the date and time columns were removed to save space and the data was split into a test and training set. 
+
+```{r}
+#remake final df
+df<-subset(df,select = c(-date,-time))
+
+#split test and train data
+train.rows <- sample(nrow(df), nrow(df) * .8)
+df_train <- df[train.rows, ]
+df_test <- df[-train.rows, ]
+```
+
+
+
+## Model Creation
+
+To make our predictions, we decided to use eXtreme Gradient Boosting. We decided to use this type of model given that it is currently the industry standard and works well regardless of the amount of features. To find the best parameters, a grid search was created. There are definitely many more parameters that could have been used in the search, but unfortunately, time was a factor. This model took approximately six hours to run, and that was with 1.5% of the original dataset. Had there been more time and computing power, many more values could have been tested and the final output would likely have been better. 
+
+First, the tuning grid was created. The boosting iterations were tested for a range of 100 to 1000. Shrinkage was tested from 0.025 to 0.3 and the max tree depth ranged from 2 to 6. All other parameters were given default values. 
+
+```{r}
+#create tuning grid
+tune_grid <- expand.grid(
+  nrounds = seq(from = 100, to = 1000, by = 50),
+  eta = c(0.025, 0.05, 0.1, 0.3),
+  max_depth = c(2, 3, 4, 5, 6),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+```
+
+Next the tuning controller was created. This used four fold cross validation. 
+
+```{r}
+#create tuning controller 
+tune_control <- trainControl(
+  method = "cv", 
+  number = 4, 
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+```
+
+Finally, the model was trained using the search grid. The x features were converted to a matrix since XGB requires numeric values. Converting to a matrix uses one hot encoding to store the factor variables.
+
+```{r include=FALSE}
+#train the model 
+xgb_tune <- train(
+  x = model.matrix(~.-fare_amount, data=df_train),
+  y = df_train[,1],
+  trControl = tune_control,
+  tuneGrid = tune_grid,
+  method = "xgbTree",
+  verbose = TRUE
+)
+```
+
+
+## Final Results
+
+```{r}
+#calculate the RMSE
+model_rmse <- rmse(df_test[,1], predict(xgb_tune$finalModel, newdata = model.matrix(~.-fare_amount, data=df_test)))
+#print rmse
+cat('RMSE:',as.character(model_rmse))
+#print model characteristics
+print(xgb_tune$bestTune)
+print(xgb_tune$finalModel)
+```
+
